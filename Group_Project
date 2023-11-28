@@ -1,0 +1,148 @@
+##loading package
+library(kknn)
+library(purrr)
+library(tidyverse)
+library(repr)
+library(tidymodels)
+library(themis)
+
+options(repr.matrix.max.rows = 6)
+
+
+set.seed(1234) 
+options(repr.plot.height = 5, repr.plot.width = 6)
+
+##Loading data
+url <- "https://github.com/JackyLinllk/ubc_dsci100_assignment/raw/main/data/Data_User_Modeling_Dataset_full.csv"
+knowledge_data<-read_csv(url)|>
+  select(STG:UNS)|>
+  mutate(UNS = as.factor(UNS))
+
+##Check NA rows
+na_row= which(!complete.cases(knowledge_data))
+print(na_row)
+
+##Delete the NA row of the data
+knowledge_data= knowledge_data[-nrow(knowledge_data),]
+
+##Typo in the dataset #very_low and Very Low should be same observation
+knowledge_data= knowledge_data|>
+  mutate(UNS = fct_recode(UNS, "very_low"="Very Low"))
+  
+
+## Check proportion and visualizing
+class_prop = knowledge_data|>
+  group_by(UNS)|>
+  summarize(count = n(),
+            percentage= count/nrow(knowledge_data)
+  )
+class_prop
+
+##Balancing the data
+ups_recipe= recipe(UNS~. ,data=knowledge_data)|>
+  step_upsample(UNS, over_ratio=1, skip=F)|>
+  prep()
+upsampled_knowledge=bake(ups_recipe, knowledge_data)
+
+##Checking the balance
+upsampled_knowledge|>
+  group_by(UNS)|>
+  summarize(n=n())
+
+
+
+##Split the data into training set and testing set
+knowledge_data_split <- initial_split(upsampled_knowledge, prop = 0.70, strata = UNS)  
+knowledge_data_split_train <- training(knowledge_data_split)
+knowledge_data_split_test <- testing(knowledge_data_split)
+
+knowledge_data_split_train
+
+
+##Finding the k value for best accuracy
+knn_tune <- nearest_neighbor(weight_func = "rectangular", neighbors = tune()) |>
+  set_engine("kknn") |>
+  set_mode("classification")
+
+data_recipe <- recipe(UNS ~. , data = knowledge_data_split_train)|>
+  step_center(all_predictors())|>
+  step_scale(all_predictors())
+
+training_vfold <-  vfold_cv(knowledge_data_split_train, v=5, strata = UNS)
+
+k_value= sqrt(nrow(knowledge_data_split_train))
+K <- tibble(neighbors = seq(1,k_value,2))
+
+knn_result <- workflow() |>
+  add_recipe(data_recipe) |>
+  add_model(knn_tune)|>
+  tune_grid(resamples = training_vfold, grid = K) |>
+  collect_metrics()|>
+  filter(.metric == "accuracy")
+
+##Scatter plot on the accuracy and number of neighbors
+cross_val_plot <- ggplot(knn_result, aes(x=neighbors, y= mean)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Neighbors", y = "Accuracy Estimate") +
+  ggtitle(label= "KNN Accuracy verses Number of Neighbors")
+cross_val_plot
+
+
+##Finding confusion matrix of model using testing set
+knn_best_tune <- nearest_neighbor(weight_func = "rectangular", neighbors = 1) |>
+  set_engine("kknn") |>
+  set_mode("classification")
+
+
+knn_fit <- workflow() |>
+  add_recipe(data_recipe) |>
+  add_model(knn_best_tune)|>
+  fit(knowledge_data_split_train)
+
+
+knowledge_predictions= knn_fit|>
+  predict(knowledge_data_split_test)|>
+  bind_cols(knowledge_data_split_test)
+
+knowledge_metrics= knowledge_predictions|>
+  metrics(truth= UNS, estimate = .pred_class)|>
+  filter(.metric== "accuracy")
+
+knowledge_conf_mat= knowledge_predictions|>
+  conf_mat(truth= UNS, estimate = .pred_class)
+
+knowledge_conf_mat
+
+##Calculating the Accuracy/Precision/Recall
+knowledge_matrix= matrix(unlist(knowledge_conf_mat), nrow = 4) ##Convert list into 5x5 matrix
+
+knowledge_accuracy= sum(diag(knowledge_matrix))/sum(knowledge_matrix) #Accuracy
+
+knowledge_precision_high= knowledge_matrix[1,1]/(sum(knowledge_matrix[,1]))#precision for high
+knowledge_precision_low= knowledge_matrix[2,2]/(sum(knowledge_matrix[,2]))#precision for low
+knowledge_precision_middle= knowledge_matrix[3,3]/(sum(knowledge_matrix[,3]))#precision for middle
+knowledge_precision_very_low= knowledge_matrix[4,4]/(sum(knowledge_matrix[,4]))#precision for very low
+average_precision= mean(knowledge_precision_high,
+                        knowledge_precision_low, 
+                        knowledge_precision_middle,
+                        nowledge_precision_very_low)
+
+
+knowledge_recall_high= knowledge_matrix[1,1]/(sum(knowledge_matrix[1,]))#Recall for high
+knowledge_recall_low= knowledge_matrix[2,2]/(sum(knowledge_matrix[2,]))#Recall for low
+knowledge_recall_middle= knowledge_matrix[3,3]/(sum(knowledge_matrix[3,]))#Recall for middle
+knowledge_recall_very_low= knowledge_matrix[4,4]/(sum(knowledge_matrix[4,]))#Recall for very low
+average_recall= mean(knowledge_recall_high,
+                        knowledge_recall_low, 
+                        knowledge_recall_middle,
+                        nowledge_recall_very_low)
+
+
+summary_prediction= data.frame(
+   accuracy= knowledge_accuracy,
+   precision= average_precision, 
+   average_recall)
+
+summary_prediction
+
